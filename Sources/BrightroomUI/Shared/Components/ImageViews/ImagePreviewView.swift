@@ -19,40 +19,96 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#if !COCOAPODS
 import BrightroomEngine
-#endif
+import SwiftUI
 import UIKit
-import Verge
+
+public struct SwiftUIImagePreviewView: View {
+
+  private let editingStack: EditingStack
+  private var displayBackground: ImageDisplayBackground = .transparent
+
+  public init(editingStack: EditingStack) {
+    self.editingStack = editingStack
+  }
+
+  public var body: some View {
+    ZStack {
+      if editingStack.loadedState != nil {
+        LoadedImagePreviewRepresentable(
+          editingStack: editingStack,
+          displayBackground: displayBackground
+        )
+      } else {
+        ProgressView()
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      }
+    }
+    .onAppear {
+      editingStack.start()
+    }
+  }
+
+  public func displayBackground(_ displayBackground: ImageDisplayBackground) -> Self {
+    var modified = self
+    modified.displayBackground = displayBackground
+    return modified
+  }
+}
+
+private struct LoadedImagePreviewRepresentable: UIViewRepresentable {
+
+  let editingStack: EditingStack
+  let displayBackground: ImageDisplayBackground
+
+  func makeUIView(context: Context) -> _ImagePreviewView {
+    let view = _ImagePreviewView(editingStack: editingStack)
+    view.displayBackground = displayBackground.metalDisplayBackground
+    view.displayCurrentEditingStackState()
+    return view
+  }
+
+  func updateUIView(_ uiView: _ImagePreviewView, context: Context) {
+    uiView.displayBackground = displayBackground.metalDisplayBackground
+    uiView.displayCurrentEditingStackState()
+  }
+}
 
 /**
  A view that displays the edited image, plus displays original image for comparison with touch-down interaction.
  */
-public final class ImagePreviewView: PixelEditorCodeBasedView {
+final class _ImagePreviewView: _PixelEditorCodeBasedView {
   // MARK: - Properties
 
   #if false
   private let imageView = _PreviewImageView()
   private let originalImageView = _PreviewImageView()
   #else
-  private let imageView = MetalImageView()
-  private let originalImageView = MetalImageView()
+  private let imageView = _MetalImageView()
+  private let originalImageView = _MetalImageView()
   #endif
 
   private let editingStack: EditingStack
-  private var subscriptions = Set<AnyCancellable>()
 
-  private var loadingOverlayFactory: (() -> UIView)?
-  private weak var currentLoadingOverlay: UIView?
+  private struct CachedCroppedImage {
+    var editingSourceCGImage: CGImage
+    var metadata: ImageProvider.ImageMetadata
+    var crop: EditingCrop
+    var image: CIImage
+  }
 
-  private var isBinding = false
-  private var cachedCroppedImage: (state: EditingStack.State.Loaded, image: CIImage)? = nil
+  private var cachedCroppedImage: CachedCroppedImage?
+
+  var displayBackground: _MetalImageView.DisplayBackground = .transparent {
+    didSet {
+      imageView.displayBackground = displayBackground
+      originalImageView.displayBackground = displayBackground
+    }
+  }
 
   // MARK: - Initializers
 
-  public init(editingStack: EditingStack) {
-    // FIXME: Loading State
-
+  init(editingStack: EditingStack) {
     self.editingStack = editingStack
 
     super.init(frame: .zero)
@@ -71,66 +127,31 @@ public final class ImagePreviewView: PixelEditorCodeBasedView {
       imageView.clipsToBounds = true
       imageView.contentMode = .scaleAspectFit
       imageView.isOpaque = false
+      imageView.displayBackground = displayBackground
       imageView.frame = bounds
       imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     }
 
     originalImageView.isHidden = true
-
-    defaultAppearance: do {
-      setLoadingOverlay(factory: {
-        LoadingBlurryOverlayView(
-          effect: UIBlurEffect(style: .dark),
-          activityIndicatorStyle: .whiteLarge
-        )
-      })
-    }
   }
 
   // MARK: - Functions
 
-  public func setLoadingOverlay(factory: (() -> UIView)?) {
-    _pixeleditor_ensureMainThread()
-    loadingOverlayFactory = factory
-  }
-
-  override public func willMove(toWindow newWindow: UIWindow?) {
-    super.willMove(toWindow: newWindow)
-
-    if newWindow != nil {
-      editingStack.start()
-
-      if isBinding == false {
-        isBinding = true
-        editingStack.sinkState { [weak self] state in
-
-          guard let self = self else { return }
-
-          state.ifChanged(\.isLoading).do { isLoading in
-            self.updateLoadingOverlay(displays: isLoading)
-          }
-
-          UIView.performWithoutAnimation {
-            if let state = state.mapIfPresent(\.loadedState) {
-              if state.hasChanges({ ($0.currentEdit) }, .equality()) {
-                self.requestPreviewImage(state: state.primitive)
-              }
-            }
-          }
-        }
-        .store(in: &subscriptions)
-      }
+  func displayCurrentEditingStackState() {
+    let loadedState = editingStack.requireLoadedStateForLoadedUIView()
+    UIView.performWithoutAnimation {
+      requestPreviewImage(state: loadedState)
     }
   }
 
-  private func requestPreviewImage(state: EditingStack.State.Loaded) {
+  private func requestPreviewImage(state: EditingStack.Loaded) {
 
     let croppedImage: CIImage
     if
       let cachedCroppedImage,
-      state.editingSourceCGImage == cachedCroppedImage.state.editingSourceCGImage,
-      state.metadata == cachedCroppedImage.state.metadata,
-      state.currentEdit.crop == cachedCroppedImage.state.currentEdit.crop
+      state.editingSourceCGImage == cachedCroppedImage.editingSourceCGImage,
+      state.metadata == cachedCroppedImage.metadata,
+      state.currentEdit.crop == cachedCroppedImage.crop
     {
       croppedImage = cachedCroppedImage.image
     } else {
@@ -139,7 +160,12 @@ public final class ImagePreviewView: PixelEditorCodeBasedView {
         crop: state.currentEdit.crop,
         orientation: state.metadata.orientation
       )
-      cachedCroppedImage = (state, croppedImage)
+      cachedCroppedImage = .init(
+        editingSourceCGImage: state.editingSourceCGImage,
+        metadata: state.metadata,
+        crop: state.currentEdit.crop,
+        image: croppedImage
+      )
     }
     imageView.display(image: croppedImage)
     imageView.postProcessing = state.currentEdit.filters.apply
@@ -147,54 +173,27 @@ public final class ImagePreviewView: PixelEditorCodeBasedView {
 
   }
 
-  private func updateLoadingOverlay(displays: Bool) {
-    if displays, let factory = loadingOverlayFactory {
-      let loadingOverlay = factory()
-      currentLoadingOverlay = loadingOverlay
-      addSubview(loadingOverlay)
-      AutoLayoutTools.setEdge(loadingOverlay, self)
-
-      loadingOverlay.alpha = 0
-      UIViewPropertyAnimator(duration: 0.6, dampingRatio: 1) {
-        loadingOverlay.alpha = 1
-      }
-      .startAnimation()
-
-    } else {
-      if let view = currentLoadingOverlay {
-        UIViewPropertyAnimator(duration: 0.6, dampingRatio: 1) {
-          view.alpha = 0
-        }&>.do {
-          $0.addCompletion { _ in
-            view.removeFromSuperview()
-          }
-          $0.startAnimation()
-        }
-      }
-    }
-  }
-
-  override public func layoutSubviews() {
+  override func layoutSubviews() {
     super.layoutSubviews()
 
-    if let loaded = editingStack.store.state.loadedState {
-      requestPreviewImage(state: loaded)
+    if editingStack.loadedState != nil {
+      displayCurrentEditingStackState()
     }
   }
 
-  override public func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
     super.touchesBegan(touches, with: event)
     originalImageView.isHidden = false
     imageView.isHidden = true
   }
 
-  override public func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+  override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
     super.touchesEnded(touches, with: event)
     originalImageView.isHidden = true
     imageView.isHidden = false
   }
 
-  override public func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+  override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
     super.touchesCancelled(touches, with: event)
     originalImageView.isHidden = true
     imageView.isHidden = false

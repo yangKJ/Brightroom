@@ -20,13 +20,11 @@
 // THE SOFTWARE.
 
 import UIKit
-#if !COCOAPODS
 import BrightroomEngine
-#endif
 
 extension CropView {
   
-  private final class TapExpandedView: PixelEditorCodeBasedView {
+  private final class TapExpandedView: _PixelEditorCodeBasedView {
     
     let horizontal: CGFloat
     let vertical: CGFloat
@@ -42,13 +40,13 @@ extension CropView {
     }
   }
   
-  final class _InteractiveCropGuideView: PixelEditorCodeBasedView, UIGestureRecognizerDelegate {
+  final class _InteractiveCropGuideView: _PixelEditorCodeBasedView, UIGestureRecognizerDelegate {
 
     var willChange: () -> Void = {}
     var updating: () -> Void = {}
     var didChange: () -> Void = {}
 
-    var didUpdateAdjustmentKind: (CropView.State.AdjustmentKind) -> Void = { _ in }
+    var didUpdateAdjustmentKind: (CropView.AdjustmentKind) -> Void = { _ in }
 
     private let topLeftControlPointView = TapExpandedView(horizontal: 16, vertical: 16)
     private let topRightControlPointView = TapExpandedView(horizontal: 16, vertical: 16)
@@ -969,7 +967,7 @@ extension CropView {
 
 }
 
-private final class MaskView: PixelEditorCodeBasedView {
+private final class MaskView: _PixelEditorCodeBasedView {
   private let topView = UIView()
   private let rightView = UIView()
   private let leftView = UIView()

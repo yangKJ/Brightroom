@@ -19,45 +19,38 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+import SwiftUI
 import UIKit
 
-#if !COCOAPODS
 import BrightroomEngine
-#endif
-import Verge
 
-public final class BlurryMaskingView: PixelEditorCodeBasedView, UIScrollViewDelegate {
+final class _BlurryMaskingView: _PixelEditorCodeBasedView, UIScrollViewDelegate {
 
-  private struct State: Equatable {
-    fileprivate(set) var bounds: CGRect = .zero
+  private var stateBounds: CGRect = .zero
+  private var proposedCrop: EditingCrop?
+  private var brushSize: MaskingBrushSize = .point(30)
 
-    fileprivate(set) var proposedCrop: EditingCrop?
-    
-    fileprivate(set) var brushSize: CanvasView.BrushSize = .point(30)
+  private func brushPixelSize() -> CGFloat? {
+    guard let proposedCrop = proposedCrop else {
+      return nil
+    }
 
-    func brushPixelSize() -> CGFloat? {
+    let aspectRatio = PixelAspectRatio(proposedCrop.cropExtent.size)
+    let size = aspectRatio.sizeThatFits(in: stateBounds.size)
 
-      guard let proposedCrop = proposedCrop else {
-        return nil
-      }
+    let (min, _) = proposedCrop.calculateZoomScale(visibleSize: size)
 
-      let aspectRatio = PixelAspectRatio(proposedCrop.cropExtent.size)
-      let size = aspectRatio.sizeThatFits(in: bounds.size)
-      
-      let (min, _) = proposedCrop.calculateZoomScale(visibleSize: size)
+    let scale = proposedCrop.scaleForDrawing()
 
-      let scale = proposedCrop.scaleForDrawing()
-
-      switch brushSize {
-      case let .point(points):
-        return points / scale / min
-      case let .pixel(pixels):
-        return pixels
-      }
+    switch brushSize {
+    case let .point(points):
+      return points / scale / min
+    case let .pixel(pixels):
+      return pixels
     }
   }
   
-  private final class ContainerView: PixelEditorCodeBasedView {
+  private final class ContainerView: _PixelEditorCodeBasedView {
     func addContent(_ view: UIView) {
       addSubview(view)
       view.frame = bounds
@@ -65,7 +58,7 @@ public final class BlurryMaskingView: PixelEditorCodeBasedView, UIScrollViewDele
     }
   }
   
-  public var isBackdropImageViewHidden: Bool {
+  var isBackdropImageViewHidden: Bool {
     get {
       backingView.isImageViewHidden
     }
@@ -74,7 +67,7 @@ public final class BlurryMaskingView: PixelEditorCodeBasedView, UIScrollViewDele
     }
   }
   
-  public var isBlurryImageViewHidden: Bool {
+  var isBlurryImageViewHidden: Bool {
     get {
       blurryImageView.isHidden
     }
@@ -88,28 +81,19 @@ public final class BlurryMaskingView: PixelEditorCodeBasedView, UIScrollViewDele
   private let containerView = ContainerView()
 
   private let blurryImageView = _ImageView()
-  
-  private let drawingView = SmoothPathDrawingView()
-  
-  private let canvasView = CanvasView()
-  
-  private var subscriptions = Set<AnyCancellable>()
-  
+
+  private let drawingView = _SmoothPathDrawingView()
+
+  private let canvasView = _CanvasView()
+
   private let editingStack: EditingStack
 
-  private let store: UIStateStore<State, Never>
-  
   private var currentBrush: OvalBrush?
-  
-  private var loadingOverlayFactory: (() -> UIView)?
-  private weak var currentLoadingOverlay: UIView?
-  
-  private var isBinding = false
-  
+
   // MARK: - Initializers
   
-  public init(editingStack: EditingStack) {
-    
+  init(editingStack: EditingStack) {
+
     self.editingStack = editingStack
     self.backingView = .init(
       editingStack: editingStack,
@@ -118,11 +102,6 @@ public final class BlurryMaskingView: PixelEditorCodeBasedView, UIScrollViewDele
     self.backingView.areAnimationsEnabled = false
     self.backingView.accessibilityIdentifier = "BlurryMasking"
 
-    store = .init(
-      initialState: .init(),
-      logger: nil
-    )
-            
     super.init(frame: .zero)
     
     setUp: do {
@@ -152,12 +131,12 @@ public final class BlurryMaskingView: PixelEditorCodeBasedView, UIScrollViewDele
     
     drawingView.handlers = drawingView.handlers&>.modify {
       $0.willBeginPan = { [unowned self] path in
-        
-        guard let pixelSize = store.state.primitive.brushPixelSize() else {
+
+        guard let pixelSize = brushPixelSize() else {
           assertionFailure("It seems currently loading state.")
           return
         }
-        
+
         currentBrush = .init(color: .black, pixelSize: pixelSize)
 
         let drawnPath = DrawnPath(brush: currentBrush!, path: path)
@@ -168,123 +147,64 @@ public final class BlurryMaskingView: PixelEditorCodeBasedView, UIScrollViewDele
       }
       $0.didFinishPan = { [unowned self] path in
         canvasView.updatePreviewDrawing()
-        
+
         let _path = (path.copy() as! UIBezierPath)
-        
+
         let drawnPath = DrawnPath(brush: currentBrush!, path: _path)
-        
+
         canvasView.previewDrawnPath = nil
         editingStack.append(blurringMaskPaths: CollectionOfOne(drawnPath))
-        
+
         currentBrush = nil
       }
     }
-    
-    editingStack.sinkState { [weak self] (state: Changes<EditingStack.State>) in
-      
-      guard let self = self else { return }
-      
-      if let state = state.mapIfPresent(\.loadedState) {
-
-        state.ifChanged(\.currentEdit.crop).do { cropRect in
-
-          // scaling for drawing paths
-          [self.canvasView, self.drawingView].forEach { view in
-            view.bounds = .init(origin: .zero, size: cropRect.imageSize)
-            let scale = Geometry.diagonalRatio(to: cropRect.scrollViewContentSize(), from: cropRect.imageSize)
-            view.transform = .init(scaleX: scale, y: scale)
-            view.frame.origin = .zero
-          }
-
-          /**
-           To avoid running pending layout operations from User Initiated actions.
-           */
-          if cropRect != self.store.state.proposedCrop {
-            self.store.commit {
-              $0.proposedCrop = cropRect
-            }
-          }
-        }
-      }
-      
-    }
-    .store(in: &subscriptions)
-    
-    defaultAppearance: do {
-      setLoadingOverlay(factory: {
-        LoadingBlurryOverlayView(effect: UIBlurEffect(style: .dark), activityIndicatorStyle: .large)
-      })
-    }
   }
 
-  override public func willMove(toSuperview newSuperview: UIView?) {
-    super.willMove(toSuperview: newSuperview)
-    
-    guard newSuperview != nil else { return }
-    
-    if isBinding == false {
-      isBinding = true
-      
-      editingStack.start()
-      
-      binding: do {
+  func loadCurrentEditingStackState() {
+    let loadedState = editingStack.requireLoadedStateForLoadedUIView()
+    let crop = loadedState.currentEdit.crop
 
-        editingStack.sinkState { [weak self] (state: Changes<EditingStack.State>) in
-          
-          guard let self = self else { return }        
-          
-          if let state = state.mapIfPresent(\.loadedState) {
-            
-            state.ifChanged(\.editingPreviewImage).do { image in
-              self.blurryImageView.display(image: BlurredMask.blur(image: image))
-            }
-            
-            state.ifChanged(\.currentEdit.drawings.blurredMaskPaths).do { paths in
-              self.canvasView.setResolvedDrawnPaths(paths)
-            }
-            
-          }
-       
-        }
-        .store(in: &subscriptions)
-      }
+    backingView.load(
+      image: loadedState.imageForCrop,
+      crop: crop
+    )
+
+    [canvasView, drawingView].forEach { view in
+      view.bounds = .init(origin: .zero, size: crop.imageSize)
+      let scale = Geometry.diagonalRatio(to: crop.scrollViewContentSize(), from: crop.imageSize)
+      view.transform = .init(scaleX: scale, y: scale)
+      view.frame.origin = .zero
     }
-  }
-  
-  public func setLoadingOverlay(factory: (() -> UIView)?) {
-    _pixeleditor_ensureMainThread()
-    loadingOverlayFactory = factory
-  }
-    
-  public func setBrushSize(_ size: CanvasView.BrushSize) {
-    store.commit {
-      $0.brushSize = size
+
+    if crop != proposedCrop {
+      proposedCrop = crop
     }
+
+    blurryImageView.display(image: BlurredMask.blur(image: loadedState.editingPreviewImage))
+    canvasView.setResolvedDrawnPaths(loadedState.currentEdit.drawings.blurredMaskPaths)
   }
 
-  override public func layoutSubviews() {
+  func setBrushSize(_ size: MaskingBrushSize) {
+    brushSize = size
+  }
+
+  override func layoutSubviews() {
     super.layoutSubviews()
 
     backingView.frame = bounds
 
-    store.commit {
-      if $0.bounds != bounds {
-        $0.bounds = bounds
-      }
+    if stateBounds != bounds {
+      stateBounds = bounds
     }
-    
+
   }
 }
 
-import SwiftUI
-
-public struct SwiftUIBlurryMaskingView: UIViewControllerRepresentable {
-
-  public typealias UIViewControllerType = _PixelEditor_WrapperViewController<BlurryMaskingView>
+public struct SwiftUIBlurryMaskingView: View {
 
   private let editingStack: EditingStack
 
-  private var _brushSize: CanvasView.BrushSize?
+  private var _brushSize: MaskingBrushSize?
 
   private var _isBackdropImageViewHidden: Bool?
   private var _isBlurryImageViewHidden: Bool?
@@ -294,48 +214,75 @@ public struct SwiftUIBlurryMaskingView: UIViewControllerRepresentable {
   ) {
     self.editingStack = editingStack
   }
-  
-  public func makeUIViewController(context: Context) -> _PixelEditor_WrapperViewController<BlurryMaskingView> {
 
-    let view = BlurryMaskingView(editingStack: editingStack)
-
-    let controller = _PixelEditor_WrapperViewController.init(bodyView: view)
-
-    return controller
-  }
-
-  public func updateUIViewController(_ uiViewController: _PixelEditor_WrapperViewController<BlurryMaskingView>, context: Context) {
-
-    if let _brushSize {
-      uiViewController.bodyView.setBrushSize(_brushSize)
+  public var body: some View {
+    ZStack {
+      if editingStack.loadedState != nil {
+        LoadedBlurryMaskingViewRepresentable(
+          editingStack: editingStack,
+          brushSize: _brushSize,
+          isBackdropImageViewHidden: _isBackdropImageViewHidden,
+          isBlurryImageViewHidden: _isBlurryImageViewHidden
+        )
+        .transition(.opacity.animation(.smooth))
+      } else {
+        ProgressView()
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .transition(.opacity.animation(.smooth))
+      }
     }
-    if let _isBackdropImageViewHidden {
-      uiViewController.bodyView.isBackdropImageViewHidden = _isBackdropImageViewHidden
-    }
-    if let _isBlurryImageViewHidden {
-      uiViewController.bodyView.isBlurryImageViewHidden = _isBlurryImageViewHidden
+    .onAppear {
+      editingStack.start()
     }
   }
 
-  public func blushSize(_ brushSize: CanvasView.BrushSize) -> Self {
-
-    var modified = self
-    modified._brushSize = brushSize
-    return modified
+  public consuming func brushSize(_ brushSize: MaskingBrushSize) -> Self {
+    self._brushSize = brushSize
+    return self
   }
 
-  public func hideBackdropImageView(_ isBackdropImageViewHidden: Bool) -> Self {
+  public consuming func hideBackdropImageView(_ isBackdropImageViewHidden: Bool) -> Self {
 
-    var modified = self
-    modified._isBackdropImageViewHidden = isBackdropImageViewHidden
-    return modified
+    self._isBackdropImageViewHidden = isBackdropImageViewHidden
+    return self
   }
 
-  public func hideBlurryImageView(_ isBlurryImageViewHidden: Bool) -> Self {
+  public consuming func hideBlurryImageView(_ isBlurryImageViewHidden: Bool) -> Self {
 
-    var modified = self
-    modified._isBlurryImageViewHidden = isBlurryImageViewHidden
-    return modified
+    self._isBlurryImageViewHidden = isBlurryImageViewHidden
+    return self
   }
 
+}
+
+private struct LoadedBlurryMaskingViewRepresentable: UIViewRepresentable {
+
+  let editingStack: EditingStack
+  let brushSize: MaskingBrushSize?
+  let isBackdropImageViewHidden: Bool?
+  let isBlurryImageViewHidden: Bool?
+
+  func makeUIView(context: Context) -> _BlurryMaskingView {
+    let view = _BlurryMaskingView(editingStack: editingStack)
+    configure(view)
+    view.loadCurrentEditingStackState()
+    return view
+  }
+
+  func updateUIView(_ uiView: _BlurryMaskingView, context: Context) {
+    configure(uiView)
+    uiView.loadCurrentEditingStackState()
+  }
+
+  private func configure(_ view: _BlurryMaskingView) {
+    if let brushSize {
+      view.setBrushSize(brushSize)
+    }
+    if let isBackdropImageViewHidden {
+      view.isBackdropImageViewHidden = isBackdropImageViewHidden
+    }
+    if let isBlurryImageViewHidden {
+      view.isBlurryImageViewHidden = isBlurryImageViewHidden
+    }
+  }
 }

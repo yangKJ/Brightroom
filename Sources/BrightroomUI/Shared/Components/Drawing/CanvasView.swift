@@ -21,71 +21,58 @@
 
 import UIKit
 
-#if !COCOAPODS
 import BrightroomEngine
-#endif
-import Verge
 
-public final class CanvasView: PixelEditorCodeBasedView {
-    
-  public enum BrushSize: Equatable {
-    case point(CGFloat)
-    case pixel(CGFloat)
-  }
-  
-  private struct State: Equatable {
-    var resolvedDrawnPaths: [DrawnPath] = []
-  }
-    
-  public override class var layerClass: AnyClass {
+public enum MaskingBrushSize: Equatable, Sendable {
+  case point(CGFloat)
+  case pixel(CGFloat)
+}
+
+final class _CanvasView: _PixelEditorCodeBasedView {
+
+  override class var layerClass: AnyClass {
     #if false
     return CATiledLayer.self
     #else
     return CALayer.self
     #endif
   }
-    
-  private let store = UIStateStore<State, Never>(initialState: .init())
-  private var subscriptions: Set<AnyCancellable> = .init()
-  
+
+  private var resolvedDrawnPaths: [DrawnPath] = [] {
+    didSet {
+      updateResolvedShapeLayers()
+    }
+  }
+
   private var resolvedShapeLayers: [CAShapeLayer] = []
   private var previewShapeLayer: CAShapeLayer?
-  
+
   override init(frame: CGRect) {
     super.init(frame: frame)
     isOpaque = false
-    
+
     if let tiledLayer = layer as? CATiledLayer {
       tiledLayer.tileSize = .init(width: 512, height: 512)
     }
-    
-    store.sinkState { [weak self] (state) in
-      
-      guard let self = self else { return }
-      
-      state.ifChanged(\.resolvedDrawnPaths).do { paths in
-        
-        let layers = paths.map { path -> CAShapeLayer in
-          let layer = Self.makeShapeLayer(for: path.brush)
-          layer.path = path.bezierPath.cgPath
-          return layer
-        }
-        
-        // TODO: Get better way for perfromance
-        self.resolvedShapeLayers.forEach {
-          $0.removeFromSuperlayer()
-        }
-              
-        layers.forEach {
-          self.layer.addSublayer($0)
-        }
-        self.resolvedShapeLayers = layers
-                     
-      }
-      
+  }
+
+  private func updateResolvedShapeLayers() {
+    let layers = resolvedDrawnPaths.map { path -> CAShapeLayer in
+      let layer = Self.makeShapeLayer(for: path.brush)
+      layer.path = path.bezierPath.cgPath
+      layer.frame = bounds
+      return layer
     }
-    .store(in: &subscriptions)
-    
+
+    // TODO: Get better way for performance.
+    resolvedShapeLayers.forEach {
+      $0.removeFromSuperlayer()
+    }
+
+    layers.forEach {
+      layer.addSublayer($0)
+    }
+    resolvedShapeLayers = layers
   }
   
   private static func makeShapeLayer(for brush: OvalBrush) -> CAShapeLayer {
@@ -103,7 +90,7 @@ public final class CanvasView: PixelEditorCodeBasedView {
     
   }
   
-  public var previewDrawnPath: DrawnPath? {
+  var previewDrawnPath: DrawnPath? {
     didSet {
       
       previewShapeLayer?.removeFromSuperlayer()
@@ -120,7 +107,7 @@ public final class CanvasView: PixelEditorCodeBasedView {
     }
   }
   
-  public func updatePreviewDrawing() {
+  func updatePreviewDrawing() {
         
     guard let drawnPath = previewDrawnPath else {
       return
@@ -133,13 +120,11 @@ public final class CanvasView: PixelEditorCodeBasedView {
     
   }
   
-  public func setResolvedDrawnPaths(_ paths: [DrawnPath]) {
-    store.commit {
-      $0.resolvedDrawnPaths = paths
-    }
+  func setResolvedDrawnPaths(_ paths: [DrawnPath]) {
+    resolvedDrawnPaths = paths
   }
    
-  public override func layoutSubviews() {
+  override func layoutSubviews() {
     super.layoutSubviews()
     resolvedShapeLayers.forEach {
       $0.frame = bounds
@@ -148,4 +133,3 @@ public final class CanvasView: PixelEditorCodeBasedView {
   }
   
 }
-
