@@ -7,7 +7,7 @@ let package = Package(
     .iOS(.v17)
   ],
   products: [
-    .library(name: "BrightroomEngine", targets: ["BrightroomUI"]),
+    .library(name: "BrightroomEngine", targets: ["BrightroomEngine"]),
     .library(name: "BrightroomUI", targets: ["BrightroomUI"]),
   ],
   dependencies: [
